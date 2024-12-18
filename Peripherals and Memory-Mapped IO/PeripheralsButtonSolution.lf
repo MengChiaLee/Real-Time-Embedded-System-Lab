@@ -1,0 +1,35 @@
+target C {
+    platform: {
+        name: "rp2040",
+        board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true,
+  
+}
+
+import Display from "lib/Display.lf"
+
+preamble {=
+    #include <pico/stdlib.h>
+    #define BUTTON_PIN 25 // GPIO 25 is connected to Button A
+=}
+
+main reactor {
+    timer t(0, 250 ms);
+     lcd = new Display();
+
+    reaction(startup) {=
+        stdio_init_all();
+        gpio_init(BUTTON_PIN);
+        gpio_set_dir(BUTTON_PIN, GPIO_IN);
+    =}
+
+    reaction(t) -> lcd.line0 {=
+        bool button_state = gpio_get(BUTTON_PIN);
+        if (button_state) {
+            lf_set(lcd.line0, "Button A: Pressed");
+        } else {
+            lf_set(lcd.line0, "Button A: Not Pressed");
+        }
+    =}
+}

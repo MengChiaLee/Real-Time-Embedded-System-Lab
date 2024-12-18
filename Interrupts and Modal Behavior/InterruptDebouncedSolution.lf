@@ -1,0 +1,49 @@
+target C {
+    platform: {
+        name: "rp2040",
+        board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true,
+    keepalive: true
+}
+
+preamble {=
+#include <pico/stdlib.h>
+#include <hardware/gpio.h>
+#define BUTTON_PIN 25 // GPIO 25 is connected to Button A
+
+static void* action;
+static instant_t last_press_time = 0;
+static const interval_t debounce_time = MSEC(200); // 200ms debounce time
+
+static inline void button_callback(uint gpio, uint32_t events) {
+    instant_t current_time = lf_time_physical();
+    interval_t elapsed_time = current_time - last_press_time;
+    if (elapsed_time > debounce_time) {
+        last_press_time = current_time;
+        if (action != NULL) {
+            lf_schedule(action, 0);
+        }
+    }
+}
+
+=}
+
+main reactor {
+    physical action button_pressed;
+
+    reaction(startup) -> button_pressed {=
+        stdio_init_all();
+        gpio_init(BUTTON_PIN);
+        gpio_set_dir(BUTTON_PIN, GPIO_IN);
+        gpio_pull_up(BUTTON_PIN);
+        gpio_set_irq_enabled_with_callback(BUTTON_PIN, GPIO_IRQ_EDGE_FALL, true, &button_callback);
+        action = button_pressed;
+        printf("Interrupt action set. Press Button A to trigger.\n");
+    =}
+
+    reaction(button_pressed) {=
+        interval_t elapsed_time = lf_time_physical_elapsed();
+        printf("Button A pressed! Elapsed time since last press: %lld ms\n", elapsed_time / MSEC(1));
+    =}
+}

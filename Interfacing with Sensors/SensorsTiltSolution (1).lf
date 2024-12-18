@@ -1,0 +1,61 @@
+/**
+ * Display the pitch and roll on the LCD display of the
+ * Pololu 3pi+ 2040 robot. This program reads accelerometer data, computes
+ * the pitch and roll angles, and displays them on the LCD.
+ *
+ * @author Edward A. Lee
+ */
+ target C {
+  platform: "RP2040",
+  single-threaded: true
+}
+
+import Tilt from "lib/Tilt.lf"
+import Accelerometer from "lib/IMU.lf"
+import Display from "lib/Display.lf"
+
+main reactor {
+  // Accelerometer
+  a = new Accelerometer();
+  
+  // Tilt to calculate the angle og pitch &roll
+  t = new Tilt();
+
+  // Display to display the data on the LCD
+  d = new Display();
+
+  // Timer trigger 250 msec
+  timer time_trigger(0, 250 msec);
+
+  // trigger every 250 msec 
+  reaction(time_trigger) -> a.trigger {=
+    lf_set(a.trigger, true);
+  =}
+
+  // transfer the data of accelerometer to Tilt to calculate the pitch&roll
+  reaction(a.x, a.y, a.z) -> t.x, t.y, t.z {=
+    lf_set(t.x, a.x->value);
+    lf_set(t.y, a.y->value);
+    lf_set(t.z, a.z->value);
+  =}
+
+  // after calculating, show the data of Ptich&roll
+  reaction(t.pitch, t.roll) -> d.line0, d.line1 {=
+    // transfer from radius to angle
+    float rad_to_deg = 57.2958;
+
+    // bus, to store the character
+    static char pitch_buf[17];
+    static char roll_buf[17];
+
+    // show the Pitch data
+    snprintf(pitch_buf, 17, "Pitch: %2.4f", t.pitch->value * rad_to_deg);
+
+    // show the roll data
+    snprintf(roll_buf, 17, "Roll: %2.4f", t.roll->value * rad_to_deg);
+
+    // display the calculating results
+    lf_set(d.line0, pitch_buf);
+    lf_set(d.line1, roll_buf);
+  =}
+}

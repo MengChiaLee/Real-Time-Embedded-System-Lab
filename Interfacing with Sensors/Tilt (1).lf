@@ -1,0 +1,46 @@
+target C {
+    platform: {
+      name: "rp2040",
+      board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true
+  }
+  
+  preamble {=
+    #include <stdio.h>
+    #include <pico/stdlib.h>
+    #include <hardware/gpio.h>
+  =}
+
+
+reactor Tilt {
+    input x: float;
+    input y: float;
+    input z: float;
+    
+    output pitch: float;
+    output roll: float;
+    
+    reaction(x, y, z) -> pitch, roll {=
+        // Constants
+        float rad_to_deg = 57.2958; // Conversion factor from radians to degrees
+
+        // Calculate pitch (rotation around x-axis)
+        // Formula: pitch = atan(y / sqrt(x^2 + z^2))
+        if (z->value != 0) {
+            float pitch_angle = atan(y->value / sqrt(x->value * x->value + z->value * z->value)) * rad_to_deg;
+            lf_set(pitch, pitch_angle);
+        } else {
+            lf_set(pitch, 0.0); // Prevent division by zero
+        }
+
+        // Calculate roll (rotation around y-axis)
+        // Formula: roll = atan(x / sqrt(y^2 + z^2))
+        if (z->value != 0) {
+            float roll_angle = atan(x->value / sqrt(y->value * y->value + z->value * z->value)) * rad_to_deg;
+            lf_set(roll, roll_angle);
+        } else {
+            lf_set(roll, 0.0); // Prevent division by zero
+        }
+    =}
+}

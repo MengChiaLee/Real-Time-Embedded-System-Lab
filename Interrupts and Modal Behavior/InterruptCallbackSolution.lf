@@ -1,0 +1,25 @@
+target C{
+    platform:{
+        name:"rp2040",
+        board:"pololu_3pi_2040_robot"
+    },
+    single-threaded:true,
+    keepalive:true
+}
+preamble{=
+    #include<pico/stdlib.h>
+    #include<stdio.h>
+    #define BUTTON_PIN 25  //gpio 25 is connected to button A
+
+    static void button_callback(uint gpio, unt32_t event){
+        printf("button A pressed! GPIO: %u, Events: %u\n, gpio, events");
+    }
+=}
+main reactor{
+    reaction(startup){=
+        stdio_init_all();
+        gpio_init(BUTTON_PIN);
+        gpio_set_dir(BUTTON_PIN,GPIO_IN);
+        gpio_set_irq_enabled_with_callback(BUTTON_PIN, GPIO_IRQ_EDGE_FALL, true, &button_callback);
+        =}
+}

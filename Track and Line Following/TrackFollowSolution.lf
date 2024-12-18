@@ -1,0 +1,198 @@
+target C {
+    platform: {
+        name: "rp2040",
+        board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+import MotorsWithFeedback from "lib/MotorsWithFeedback.lf"
+import Line from "lib/Line.lf"
+import Encoders from "lib/Encoders.lf"
+
+reactor Robot {
+    input line_value0:bool
+    input line_value1:bool
+    input line_value2:bool
+    input line_value3:bool
+    input line_value4:bool
+    input left_encoder:int32_t
+    input right_encoder:int32_t
+    output notify:string
+    
+    state base_speed:float = 0.05
+    state normal_speed:float = 0.05
+    state slow_speed:float = 0.03
+    state turn_min:float = 0.6
+    state turn_max:float = 1.5
+    state sharp_turn_min:float = 0.2
+    state sharp_turn_max:float = 2.0
+    state turn_step:float = 0.15
+    state current_turn:float = 1.0
+    state prev_direction:int = 0
+    state is_calibrated:bool = false
+    state in_sharp_turn:bool = false
+    
+    motors = new MotorsWithFeedback()
+    
+    left_encoder -> motors.left
+    right_encoder -> motors.right
+    
+    reaction(startup) -> notify {=
+        lf_set(notify, "CALIBRATING");
+    =}
+
+    reaction(line_value0, line_value1, line_value2, line_value3, line_value4)
+        -> motors.left_speed, motors.right_speed, notify {=
+        if (!self->is_calibrated) {
+            self->is_calibrated = true;
+            lf_set(notify, "FOLLOWING");
+            return;
+        }
+
+        // 檢測線的位置
+        bool far_left = line_value0->value;
+        bool near_left = line_value1->value;
+        bool center = line_value2->value;
+        bool near_right = line_value3->value;
+        bool far_right = line_value4->value;
+
+        // 檢測銳角轉彎
+        bool sharp_turn_left = far_left && near_left;
+        bool sharp_turn_right = far_right && near_right;
+        self->in_sharp_turn = sharp_turn_left || sharp_turn_right;
+
+        // 根據轉彎類型調整基礎速度
+        self->base_speed = self->in_sharp_turn ? self->slow_speed : self->normal_speed;
+
+        // 根據偏離程度調整轉向係數
+        if (sharp_turn_left || sharp_turn_right) {
+            self->current_turn = self->sharp_turn_max;
+        } else if (far_left || far_right) {
+            self->current_turn = self->turn_max;
+        } else if (near_left || near_right) {
+            self->current_turn += self->turn_step;
+            if (self->current_turn > self->turn_max) {
+                self->current_turn = self->turn_max;
+            }
+        }
+
+        if (center && !self->in_sharp_turn) {
+            // 直線前進，漸漸恢復正常速度
+            self->current_turn = self->turn_min;
+            lf_set(motors.left_speed, self->base_speed);
+            lf_set(motors.right_speed, self->base_speed);
+            self->prev_direction = 0;
+            lf_set(notify, "CENTER");
+        }
+        else if (sharp_turn_left) {
+            // 銳角左轉
+            printf("left\n");
+            lf_set(motors.left_speed, self->base_speed * self->sharp_turn_min);
+            lf_set(motors.right_speed, self->base_speed * self->sharp_turn_max);
+            self->prev_direction = -1;
+            lf_set(notify, "SHARP_LEFT");
+        }
+        else if (sharp_turn_right) {
+            // 銳角右轉
+            printf("right\n");
+            lf_set(motors.left_speed, self->base_speed * self->sharp_turn_max);
+            lf_set(motors.right_speed, self->base_speed * self->sharp_turn_min);
+            self->prev_direction = 1;
+            lf_set(notify, "SHARP_RIGHT");
+        }
+        else if (far_left || near_left) {
+            // 一般左轉
+            printf("left\n");
+            float turn_factor = far_left ? self->turn_max : self->current_turn;
+            lf_set(motors.left_speed, self->base_speed * (2.0 - turn_factor));
+            lf_set(motors.right_speed, self->base_speed * turn_factor);
+            self->prev_direction = -1;
+            lf_set(notify, "LEFT");
+        }
+        else if (far_right || near_right) {
+            // 一般右轉
+            printf("right\n");
+            float turn_factor = far_right ? self->turn_max : self->current_turn;
+            lf_set(motors.left_speed, self->base_speed * turn_factor);
+            lf_set(motors.right_speed, self->base_speed * (2.0 - turn_factor));
+            self->prev_direction = 1;
+            lf_set(notify, "RIGHT");
+        }
+        else if (self->prev_direction != 0) {
+            // 找不到線時的搜索行為
+            float search_speed = self->base_speed * (self->in_sharp_turn ? 
+                                                   self->sharp_turn_min : 
+                                                   self->turn_min);
+            if (self->prev_direction < 0) {
+                lf_set(motors.left_speed, search_speed);
+                lf_set(motors.right_speed, self->base_speed);
+            } else {
+                lf_set(motors.left_speed, self->base_speed);
+                lf_set(motors.right_speed, search_speed);
+            }
+            lf_set(notify, "SEARCHING");
+        }
+        else {
+            // 完全失去軌跡時停止
+            lf_set(motors.left_speed, 0.0);
+            lf_set(motors.right_speed, 0.0);
+            lf_set(notify, "STOP");
+        }
+    =}
+}
+
+main reactor {
+    timer t(0, 100 msec)           // 編碼器計時器
+    timer sample_t(0, 10 msec)     // 採樣計時器
+    timer calibration(10 sec)      // 校準計時器
+    timer countdown(0, 1 sec)      // 倒數計時器
+    
+    robot = new Robot()
+    display = new Display()
+    line = new Line()
+    encoders = new Encoders()
+    
+    state count:int = 10
+    
+    reaction(startup) -> display.line1 {=
+        lf_set(display.line1, "Calibrating: 10");
+    =}
+    
+    reaction(countdown) -> display.line1 {=
+        if (self->count > 0) {
+            self->count--;
+            char buf[20];
+            snprintf(buf, 20, "Calibrating: %d", self->count);
+            lf_set(display.line1, buf);
+        }
+    =}
+    
+    reaction(calibration) -> line.calibrate, display.line1 {=
+        lf_set(line.calibrate, false);
+        lf_set(display.line1, "Following Line");
+    =}
+    
+    reaction(sample_t) -> line.trigger {=
+        lf_set(line.trigger, true);
+    =}
+    
+    reaction(t) -> encoders.trigger {=
+        lf_set(encoders.trigger, true);
+    =}
+    
+    reaction(line.reflect) -> 
+        robot.line_value0, robot.line_value1, robot.line_value2, 
+        robot.line_value3, robot.line_value4 {=
+        lf_set(robot.line_value0, line.reflect->value[0] > 750);
+        lf_set(robot.line_value1, line.reflect->value[1] > 750);
+        lf_set(robot.line_value2, line.reflect->value[2] > 750);
+        lf_set(robot.line_value3, line.reflect->value[3] > 750);
+        lf_set(robot.line_value4, line.reflect->value[4] > 750);
+    =}
+    
+    encoders.left -> robot.left_encoder
+    encoders.right -> robot.right_encoder
+    robot.notify -> display.line0
+}

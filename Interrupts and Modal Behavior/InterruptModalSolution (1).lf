@@ -1,0 +1,90 @@
+target C {
+    platform: {
+        name: "rp2040",
+        board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+
+preamble {=
+    #include <stdio.h>
+    #include <pico/stdlib.h>
+    #include <hardware/gpio.h>
+=}
+
+reactor Button {
+    output pressed:bool;
+    state last_state:bool = true;  // Initialize to true because of pull-up
+    timer t(0, 50 msec);  // Increased polling interval for better debouncing
+    
+    reaction(startup) {=
+        gpio_init(25);  // Button A
+        gpio_set_dir(25, GPIO_IN);
+        gpio_pull_up(25);
+    =}
+    
+    reaction(t) -> pressed {=
+        // Button is active low (pulled up)
+        bool current_state = gpio_get(25);
+        
+        // Detect falling edge (button press)
+        if (current_state == 0 && self->last_state == 1) {
+            lf_set(pressed, true);
+            printf("Button pressed!\n");  // Debug print
+        }
+        
+        self->last_state = current_state;
+    =}
+}
+
+reactor Counter {
+    input button_press:bool;
+    output count:int;
+    state current_count:int = 0;
+    state counting_up:bool = true;
+    logical action update_count;
+    
+    reaction(startup) -> update_count, count {=
+        static char buffer[17];
+        snprintf(buffer, 16, "%d", self->current_count);
+        lf_set(count, buffer);
+        lf_schedule(update_count, 0);
+    =}
+    
+    reaction(button_press) {=
+        self->counting_up = !self->counting_up;
+        printf("Direction changed: now counting %s\n", self->counting_up ? "up" : "down");
+    =}
+    
+    reaction(update_count) -> count, update_count {=
+        // Update count based on direction
+        if (self->counting_up) {
+            self->current_count++;
+            lf_schedule(update_count, MSEC(1000));  // Schedule next update in 1 second
+        } else {
+            self->current_count--;
+            lf_schedule(update_count, MSEC(2000));  // Schedule next update in 2 seconds
+        }
+        
+        // Update display
+        static char buffer[17];
+        snprintf(buffer, 16, "%d", self->current_count);
+        lf_set(count, buffer);
+        
+        // Debug print
+        printf("Current count: %d, Direction: %s\n", 
+            self->current_count, 
+            self->counting_up ? "up" : "down");
+    =}
+}
+
+main reactor {
+    b = new Button();
+    l = new Display();
+    c = new Counter();
+    
+    b.pressed -> c.button_press;
+    c.count -> l.line0;
+}

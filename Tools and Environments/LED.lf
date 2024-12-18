@@ -1,0 +1,32 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+preamble {=
+  #include <stdio.h>
+  #include <pico/stdlib.h>
+  #include <hardware/gpio.h>
+=}
+
+reactor LED {
+  input set: bool;
+  state led_on: bool = false;  
+
+  
+  reaction(startup) {=
+    gpio_init(PICO_DEFAULT_LED_PIN);
+    gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+  =}
+
+  
+  reaction(set) {=
+    self->led_on = set->value;
+    printf("LED State: %d\n", self->led_on);  
+    gpio_put(PICO_DEFAULT_LED_PIN, self->led_on);
+  =}
+}
+

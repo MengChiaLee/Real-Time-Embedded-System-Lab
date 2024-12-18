@@ -1,0 +1,70 @@
+target C {
+    platform: {
+        name: "rp2040",
+        board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+import Motors from "lib/Motors.lf"
+
+reactor Robot {
+    input drive: bool
+    output notify: string
+    
+    motors = new Motors()
+    
+    reaction(startup) -> notify {=
+        lf_set(notify, "INIT");
+    =}
+    
+    initial mode STOPPED {
+        reaction(drive) -> motors.left_power, motors.right_power, reset(DRIVING), notify {=
+            if (drive->value) {
+                lf_set(motors.left_power, 0.1f);
+                lf_set(motors.right_power, 0.1f);
+                lf_set_mode(DRIVING);
+                lf_set(notify, "DRIVING");
+            }
+        =}
+        
+        reaction(startup) -> motors.left_power, motors.right_power {=
+            // Initialize motors to stopped state
+            lf_set(motors.left_power, 0.0f);
+            lf_set(motors.right_power, 0.0f);
+        =}
+    }
+    
+    mode DRIVING {
+        reaction(drive) -> motors.left_power, motors.right_power, reset(STOPPED), notify {=
+            if (!drive->value) {
+                lf_set(motors.left_power, 0.0f);
+                lf_set(motors.right_power, 0.0f);
+                lf_set_mode(STOPPED);
+                lf_set(notify, "STOPPED");
+            }
+        =}
+        
+        reaction(startup) -> motors.left_power, motors.right_power {=
+            // Initialize motors to driving state
+            lf_set(motors.left_power, 0.1f);
+            lf_set(motors.right_power, 0.1f);
+        =}
+    }
+}
+
+main reactor {
+    timer t(0, 2 sec)
+    state drive: bool = false
+    
+    robot = new Robot()
+    display = new Display()
+    
+    robot.notify -> display.line0
+    
+    reaction(t) -> robot.drive {=
+        lf_set(robot.drive, self->drive);
+        self->drive = !self->drive;
+    =}
+}

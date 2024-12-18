@@ -1,0 +1,382 @@
+target C {
+    platform: {
+        name: "rp2040",
+        board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+// import Motors from "lib/Motors.lf"
+import Encoders from "lib/Encoders.lf"
+import GyroAngle from "lib/IMU.lf"
+import Line from "lib/Line.lf"
+import MotorsWithFeedback from "lib/MotorsWithFeedback.lf"
+import Tilt from "lib/Tilt.lf"  // 引入Tile Reactor
+import Accelerometer from "lib/IMU.lf"
+
+
+reactor AngleToDistance {
+    input angle:int32_t;
+    output distance:float;
+    
+    reaction(angle) -> distance {=
+        const double WHEEL_DIAMETER = 0.03175; // 3.175 cm in meters
+        const double PI = 3.14159265359;
+        double distance_traveled = ((double)angle->value / 360.0) * (PI * WHEEL_DIAMETER);
+        lf_set(distance, distance_traveled);
+    =}
+}
+
+reactor Robot {
+    input drive:bool;
+    input turn:bool;
+    input line_value0:bool;
+    input line_value1:bool;
+    input line_value2:bool;
+    input line_value3:bool;
+    input line_value4:bool;
+    input left_encoder:int32_t;
+    input right_encoder:int32_t;
+    input roll:float;     
+    input pitch:float;
+    output notify:string;
+    state is_slope_turning:bool = false;  // 新增這個狀態變數
+    state detected_position:int = 0;  // 0:中間, 1:左側, 2:右側
+    state is_descending:bool = false;
+    state base_speed:float = 0.1;
+    state current_left_speed:float = 0.1;
+    state current_right_speed:float = 0.1;
+    
+    motors = new MotorsWithFeedback()
+    
+    // 連接編碼器輸入
+    left_encoder -> motors.left;
+    right_encoder -> motors.right;
+    
+    // 處理俯仰角，調整基礎速度
+  
+    
+    // 處理橫滾角，調整左右輪速差
+    reaction(roll) {=
+        if (!self->is_descending) {
+            float adjustment = roll->value * 0.001f;
+            self->current_left_speed = self->base_speed + adjustment;
+            self->current_right_speed = self->base_speed - adjustment;
+        }
+    =}
+    
+    initial mode DRIVING {
+        reaction(startup) -> notify {=
+            lf_set(notify, "INIT");
+        =}
+
+        reaction(drive) -> motors.left_speed, motors.right_speed {=
+            // 使用當前計算的速度
+            lf_set(motors.left_speed, self->current_left_speed);
+            lf_set(motors.right_speed, self->current_right_speed);
+        =}
+        
+        reaction(line_value0, line_value1, line_value2, line_value3, line_value4) 
+            -> motors.left_speed, motors.right_speed, reset(BACK), notify {=
+            if (line_value0->value || line_value1->value) {
+                self->detected_position = 1;  // 左側檢測到
+                lf_set(motors.left_speed, -self->base_speed);
+                lf_set(motors.right_speed, -self->base_speed);
+                lf_set_mode(BACK);
+                lf_set(notify, "BACK");
+            }
+            // 檢查中間感應器
+            else if (line_value1->value || line_value2->value || line_value3->value) {
+                self->detected_position = 0;  // 中間檢測到
+                lf_set(motors.left_speed, -self->base_speed);
+                lf_set(motors.right_speed, -self->base_speed);
+                lf_set_mode(BACK);
+                lf_set(notify, "BACK");
+            }
+            // 檢查右側感應器
+            else if (line_value3->value || line_value4->value) {
+                self->detected_position = 2;  // 右側檢測到
+                lf_set(motors.left_speed, -self->base_speed);
+                lf_set(motors.right_speed, -self->base_speed);
+                lf_set_mode(BACK);
+                lf_set(notify, "BACK");
+            }
+        =}
+    }
+    
+    mode BACK {
+        reaction(startup) -> motors.left_speed, motors.right_speed {=
+            lf_set(motors.left_speed, -self->base_speed);
+            lf_set(motors.right_speed, -self->base_speed);
+        =}
+        
+        reaction(drive) -> motors.left_speed, motors.right_speed, reset(TURNING), notify {=
+            if (!drive->value) {
+                // 開始轉向
+                float turn_speed = self->base_speed;
+                if (self->is_slope_turning) {
+                // 坡道轉向（180度）
+                lf_set(motors.left_speed, turn_speed);
+                lf_set(motors.right_speed, -turn_speed);
+                lf_set(notify, "SLOPE_TURNING");}
+                else if (self->detected_position == 1) {  // 左側檢測到，右轉
+                    lf_set(motors.left_speed, turn_speed);
+                    lf_set(motors.right_speed, -turn_speed);
+                } else if (self->detected_position == 2) {  // 右側檢測到，左轉
+                    lf_set(motors.left_speed, -turn_speed);
+                    lf_set(motors.right_speed, turn_speed);
+                } else {  // 中間檢測到，預設右轉
+                    lf_set(motors.left_speed, -turn_speed);
+                    lf_set(motors.right_speed, turn_speed);
+                }
+                lf_set_mode(TURNING);
+                lf_set(notify, "TURNING");
+            }
+        =}
+        reaction(pitch) -> motors.left_speed, motors.right_speed, reset(TURNING), notify {=
+            if (pitch->value < -10.0) {
+                self->is_descending = true;
+                self->base_speed = 0.05f;
+            } else {
+                if (self->is_descending && fabs(pitch->value) < 10.0) {
+                    self->is_slope_turning = true;  // 觸發 180 度轉向
+                    lf_set_mode(TURNING);  // 取消註解
+                    lf_set(notify, "TURNING");  // 可以加入通知
+                }
+                self->is_descending = false;
+                self->base_speed = 0.1f;
+            }
+        =}
+    }
+    
+    mode TURNING {
+        reaction(startup) -> motors.left_speed, motors.right_speed, notify {=
+            float turn_speed = self->base_speed;
+            if (self->is_slope_turning) {
+                // 坡道轉向（180度）
+                lf_set(motors.left_speed, turn_speed);
+                lf_set(motors.right_speed, -turn_speed);
+                lf_set(notify, "SLOPE_TURNING");
+            }else if (self->detected_position == 1) {
+                // 左側檢測到，右轉
+                lf_set(motors.left_speed, turn_speed);
+                lf_set(motors.right_speed, -turn_speed);
+            } else if (self->detected_position == 2) {
+                // 右側檢測到，左轉
+                lf_set(motors.left_speed, -turn_speed);
+                lf_set(motors.right_speed, turn_speed);
+            } else {
+                // 中間檢測到，預設右轉
+                lf_set(motors.left_speed, turn_speed);
+                lf_set(motors.right_speed, -turn_speed);
+            }
+            lf_set(notify, "TURNING_START");
+        =}
+        reaction(turn) -> motors.left_speed, motors.right_speed, reset(DRIVING), notify {=
+            if (turn->value) {
+                // 恢復正常行駛
+                lf_set(motors.left_speed, self->current_left_speed);
+                lf_set(motors.right_speed, self->current_right_speed);
+                lf_set_mode(DRIVING);
+                lf_set(notify, "DRIVING");
+            }
+        =}
+        
+    }
+    
+}
+main reactor(calibration_time: time = 10 s, sample_period: time = 100 ms)  {
+    disp = new Display()
+    encoder = new Encoders()
+    gyro = new GyroAngle()
+    left_distance = new AngleToDistance()
+    right_distance = new AngleToDistance()
+    robot = new Robot()
+    line = new Line()
+    tilt = new Tilt()  // 新增 Tilt 實例
+    a = new Accelerometer()
+
+    state current_distance:float = 0.0
+    state back_distance:float = 0.1
+    state current_angle:float = 0.0
+    state is_at_top:bool = false        // 是否到達坡頂
+    // state target_angle:float = 90.0     // 預設轉向角度(用於邊緣檢測)
+    state is_slope_turning:bool = false // 是否正在執行坡頂轉向
+    state is_turning:bool = false
+    state back_start_distance:float = 0.0
+    state is_backing:bool = false
+    state turn_start_angle:float = 0.0     // 新增：記錄開始轉向時的角度
+    state has_recorded_start_angle:bool = false  // 新增：標記是否已記錄開始角度
+    state is_descending:bool = false 
+    timer end_calibration(calibration_time)
+    state count: int = 0
+    timer t(0, 100 msec)
+    timer sample_t(0, sample_period)
+    timer seconds(0, 1 s)
+
+    state base_speed:float = 0.1
+    state current_left_speed:float = 0.1
+    state current_right_speed:float = 0.1
+
+    state is_calibrated:bool = false  // 新增校正狀態追踪
+    // 在 main reactor 中添加
+    encoder.left -> robot.left_encoder
+    encoder.right -> robot.right_encoder
+    
+    reaction(startup) ->  disp.line1{=
+        // lf_set(robot.drive, true);
+        lf_set(disp.line1, "CALIBRATING");
+    =}
+    
+    reaction(seconds) -> disp.line3 {=
+        static char buf[17];
+        snprintf(buf, 17, "time:%8d s", self->count++);
+        lf_set(disp.line3, buf);
+    =}
+
+    reaction(end_calibration) -> robot.drive,line.calibrate {=
+        lf_set(line.calibrate, false);
+        self->is_calibrated = true;    // 標記校正完成
+        lf_set(robot.drive, true);     // 校正完成後才啟動
+    =}
+      reaction(sample_t) -> line.trigger {=
+        lf_set(line.trigger, true);
+    =}
+
+    reaction(t) -> encoder.trigger, gyro.trigger,a.trigger {=
+        lf_set(encoder.trigger, true);
+        lf_set(gyro.trigger, true);
+        lf_set(a.trigger,true);
+    =}
+
+
+    reaction(line.reflect) -> robot.line_value0, robot.line_value1, robot.line_value2, robot.line_value3, robot.line_value4{=
+        
+      // 檢查左側感測器 (0和1)
+        if (line.reflect->value[0] > 750 || line.reflect->value[1] > 750) {
+            self->back_start_distance = self->current_distance;
+            self->is_backing = true;
+            self->has_recorded_start_angle = false;  // 重置角度記錄標記
+            lf_set(robot.line_value0, line.reflect->value[0]);
+            lf_set(robot.line_value1, line.reflect->value[1]);
+        }
+        
+        // 檢查中間感測器 (1,2,3)  // 修正：使用正確的中間感測器組
+        if (line.reflect->value[1] > 750 || 
+            line.reflect->value[2] > 750 || 
+            line.reflect->value[3] > 750) {
+            self->back_start_distance = self->current_distance;
+            self->is_backing = true;
+            self->has_recorded_start_angle = false;  // 重置角度記錄標記
+            lf_set(robot.line_value1, line.reflect->value[1]);
+            lf_set(robot.line_value2, line.reflect->value[2]);
+            lf_set(robot.line_value3, line.reflect->value[3]);
+        }
+        
+        // 檢查右側感測器 (3和4)
+        if (line.reflect->value[3] > 750 || line.reflect->value[4] > 750) {
+            self->back_start_distance = self->current_distance;
+            self->is_backing = true;
+            self->has_recorded_start_angle = false;  // 重置角度記錄標記
+            lf_set(robot.line_value3, line.reflect->value[3]);
+            lf_set(robot.line_value4, line.reflect->value[4]);
+        }
+    =}
+
+    reaction(left_distance.distance, right_distance.distance) -> robot.drive {=
+        self->current_distance = (left_distance.distance->value + 
+            right_distance.distance->value) / 2.0;
+        
+        if (self->is_backing) {
+            float backed_distance = fabs(self->current_distance - self->back_start_distance);
+            
+            if (backed_distance >= self->back_distance) {
+                self->is_backing = false;
+                lf_set(robot.drive, false);
+            }
+        }
+    =}
+    reaction(a.x, a.y, a.z) -> tilt.x, tilt.y, tilt.z {=
+        lf_set(tilt.x, a.x->value);
+        lf_set(tilt.y, a.y->value);
+        lf_set(tilt.z, a.z->value);
+      =}
+    
+    // 新增：處理轉向邏輯
+    reaction(tilt.pitch,tilt.roll,gyro.z) -> robot.pitch, robot.roll,robot.turn{=
+        self->current_angle = gyro.z->value;
+
+        if (self->is_turning && !self->has_recorded_start_angle) {
+            self->turn_start_angle = self->current_angle;
+            self->has_recorded_start_angle = true;
+            return;
+        }
+        
+        if (fabs(tilt.pitch->value) < 10.0) {  // 平面
+        // 在平面上時設置180度轉向
+        self->is_slope_turning = true;  // 180度
+        self->base_speed = 0.1f;
+    } else {  // 上坡或下坡
+        // 不在平面時設置90度轉向
+        self->is_slope_turning = false;  // 90度
+        if (tilt.pitch->value < -10.0) {  // 下坡
+            self->base_speed = 0.05f;  // 下坡時降低速度
+        } else {  // 上坡
+            self->base_speed = 0.1f;
+        }
+    }
+            // 更新當前速度
+        self->current_left_speed = self->base_speed;
+        self->current_right_speed = self->base_speed;
+
+        if (self->is_turning) {
+            float angle_turned = fabs(self->current_angle - self->turn_start_angle);
+            float target = self->is_slope_turning ? 180.0 : 90.0;
+            
+            if (angle_turned >= target) {
+                self->is_turning = false;
+                lf_set(robot.turn, true);
+            }
+        }
+    =}
+    //  reaction(tilt.pitch) {=
+       
+    // =}
+
+    // 修改：更新顯示邏輯
+    reaction(robot.notify, left_distance.distance, right_distance.distance, gyro.z) -> disp.line1, disp.line2 {=
+        static char buf1[17];
+        static char buf2[17];
+        
+        if (strcmp(robot.notify->value, "TURNING") == 0) {
+            self->is_turning = true;
+            if (!self->has_recorded_start_angle) {
+                self->turn_start_angle = gyro.z->value;
+                self->has_recorded_start_angle = true;
+            }
+            float angle_turned = fabs(gyro.z->value - self->turn_start_angle);
+            
+            // 根據不同情況顯示不同信息
+            if (self->is_slope_turning) {
+                snprintf(buf1, 17, "Slope Turn:%.1f", angle_turned);
+                snprintf(buf2, 17, "Target: 180.0");
+            } else {
+                snprintf(buf1, 17, "Edge Turn:%.1f", angle_turned);
+                snprintf(buf2, 17, "Target: 90.0");
+            }
+        } else if (strcmp(robot.notify->value, "DRIVING") == 0) {
+            self->is_turning = false;
+            self->has_recorded_start_angle = false;
+            self->is_slope_turning = false;  // 重置坡頂轉向標記
+            snprintf(buf1, 17, "Forward");
+        }
+        
+        lf_set(disp.line1, buf1);
+        lf_set(disp.line2, buf2);
+    =}
+
+    robot.notify -> disp.line0
+    encoder.left -> left_distance.angle
+    encoder.right -> right_distance.angle
+}

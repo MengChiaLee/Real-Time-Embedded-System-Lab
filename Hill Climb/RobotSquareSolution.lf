@@ -1,0 +1,169 @@
+target C {
+    platform: {
+        name: "rp2040",
+        board: "pololu_3pi_2040_robot"
+    },
+    single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+import Motors from "lib/Motors.lf"
+import Encoders from "lib/Encoders.lf"
+import GyroAngle from "lib/IMU.lf"
+
+reactor AngleToDistance {
+    input angle:int32_t;
+    output distance:float;
+    
+    reaction(angle) -> distance {=
+        const double WHEEL_DIAMETER = 0.03175; // 3.175 cm in meters
+        const double PI = 3.14159265359;
+        double distance_traveled = ((double)angle->value / 360.0) * (PI * WHEEL_DIAMETER);
+        lf_set(distance, distance_traveled);
+    =}
+}
+
+reactor Robot {
+    input drive:bool;
+    input turn:bool;
+    output notify:string;
+    
+    motors = new Motors()
+    
+    reaction(startup) -> notify {=
+        lf_set(notify, "INIT");
+    =}
+    
+    initial mode DRIVING {
+        reaction(drive) -> motors.left_power, motors.right_power, reset(TURNING), notify {=
+            if (!drive->value) {
+                lf_set(motors.left_power, 0.1f);
+                lf_set(motors.right_power, -0.1f);
+                lf_set_mode(TURNING);
+                lf_set(notify, "TURNING");
+            }
+        =}
+        
+        reaction(startup) -> motors.left_power, motors.right_power {=
+            lf_set(motors.left_power, 0.12f);
+            lf_set(motors.right_power, 0.1f);
+        =}
+    }
+    
+    mode TURNING {
+        reaction(turn) -> motors.left_power, motors.right_power, reset(DRIVING), notify {=
+            if (turn->value) {
+                lf_set(motors.left_power, 0.12f);
+                lf_set(motors.right_power, 0.1f);
+                lf_set_mode(DRIVING);
+                lf_set(notify, "DRIVING");
+            }
+        =}
+        
+        reaction(startup) -> motors.left_power, motors.right_power, notify {=
+            lf_set(motors.left_power, 0.1f);
+            lf_set(motors.right_power, -0.1f);
+            lf_set(notify, "TURNING_START");
+        =}
+    }
+}
+
+main reactor {
+    display = new Display()
+    encoder = new Encoders()
+    gyro = new GyroAngle()
+    left_distance = new AngleToDistance()
+    right_distance = new AngleToDistance()
+    robot = new Robot()
+    
+    state current_distance:float = 0.0
+    state target_distance:float = 0.5    // 走直線的目標距離
+    state current_angle:float = 0.0
+    state target_angle:float = 90.0    // 轉向的目標角度
+    state is_turning:bool = false
+    state drive_start_distance:float = 0.0  // 開始直走時的距離
+    state turn_start_angle:float = 0.0      // 開始轉向時的角度
+    state has_recorded_start_angle:bool = false
+    state has_recorded_start_distance:bool = false
+    state side_count:int = 0           // 已完成的邊數
+    
+    timer t(0, 100 msec)
+    
+    reaction(startup) -> robot.drive {=
+        lf_set(robot.drive, true);
+    =}
+    
+    reaction(t) -> encoder.trigger, gyro.trigger {=
+        lf_set(encoder.trigger, true);
+        lf_set(gyro.trigger, true);
+    =}
+
+    // 處理直線行走距離
+    reaction(left_distance.distance, right_distance.distance) -> robot.drive {=
+        self->current_distance = (left_distance.distance->value + 
+            right_distance.distance->value) / 2.0;
+        
+        // 如果還沒記錄起始距離且不在轉向狀態
+        if (!self->has_recorded_start_distance && !self->is_turning) {
+            self->drive_start_distance = self->current_distance;
+            self->has_recorded_start_distance = true;
+            return;
+        }
+
+        // 如果在直走狀態，檢查是否達到目標距離
+        if (!self->is_turning) {
+            float distance_traveled = fabs(self->current_distance - self->drive_start_distance);
+            if (distance_traveled >= self->target_distance) {
+                self->has_recorded_start_distance = false;  // 重置距離記錄狀態
+                lf_set(robot.drive, false);  // 觸發轉向
+            }
+        }
+    =}
+    // 處理轉向邏輯
+    reaction(gyro.z) -> robot.turn {=
+        // 更新當前角度
+        self->current_angle = gyro.z->value;
+
+        // 檢查是否正在轉向且尚未記錄起始角度
+        if (self->is_turning && !self->has_recorded_start_angle) {
+            self->turn_start_angle = self->current_angle;
+            self->has_recorded_start_angle = true;
+            return;
+        }
+
+        // 如果正在轉向，檢查是否達到目標角度
+        if (self->is_turning) {
+            float angle_turned = fabs(self->current_angle - self->turn_start_angle);
+            
+            if (angle_turned >= self->target_angle) {
+                self->is_turning = false;
+                self->has_recorded_start_angle = false;  // 重置角度記錄狀態
+                lf_set(robot.turn, true);  // 通知Robot reactor結束轉向
+            }
+        }
+    =}
+
+    // 更新顯示邏輯
+    reaction(robot.notify, left_distance.distance, right_distance.distance, gyro.z) -> display.line1, display.line2 {=
+        static char buf1[17];
+        static char buf2[17];
+        
+        if (strcmp(robot.notify->value, "TURNING") == 0) {
+            self->is_turning = true;
+            float angle_turned = fabs(self->current_angle - self->turn_start_angle);
+            snprintf(buf1, 17, "Turn: %.1f", angle_turned);
+            snprintf(buf2, 17, "Target: %.1f", self->target_angle);
+        } else if (strcmp(robot.notify->value, "DRIVING") == 0) {
+            float distance_traveled = fabs(self->current_distance - self->drive_start_distance);
+            snprintf(buf1, 17, "Dist: %.3f", distance_traveled);
+            snprintf(buf2, 17, "Target: %.3f", self->target_distance);
+        }
+        
+        lf_set(display.line1, buf1);
+        lf_set(display.line2, buf2);
+    =}
+
+    robot.notify -> display.line0
+    encoder.left -> left_distance.angle
+    encoder.right -> right_distance.angle
+}
